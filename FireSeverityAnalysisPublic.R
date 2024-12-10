@@ -289,7 +289,7 @@ summary(DeciduousEq_HLS)
 summary(GraminoidEq_HLS)
 
 #Now take those coefficients and move to the Google Earth Engine code to generate the second set of unmixing values
-#GEE Code: https://code.earthengine.google.com/88c730cdfb38c808b4ef791fd36d8ed7
+#GEE Code: https://code.earthengine.google.com/460e8e7e862bf6f3fc72c8ec3e585786
 #All necessary assets for the Earth Engine code are public
 #Come back after generating the unmixed IntFire values
 

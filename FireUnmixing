@@ -514,7 +514,7 @@ var NuggetImagePre = addNBR(addNDVI(addGNDVI(addSR(refImgN))));
 var NuggetImagePost = addNBR(addNDVI(addGNDVI(addSR(refImgN2))));
 
 //Create the unmixed images
-var nuggetUnmixed = mesma_HLS(refImgN);
+var nuggetUnmixed = mesma_HLS(refImgN, em_lib, stimg);
 //Map.addLayer(nuggetUnmixed.clip(nugget), {}, 'NuggetUnmixed');//You can uncomment this line to add the layer to the map
 
 //Calculate RMSE for the unmixed image
@@ -534,7 +534,7 @@ var NuggetIF_coarse = unmixApp_coarse(NuggetImagePre, NuggetImagePost, nuggetUnm
 var em_lib = dictSet(refImgS, SCC, SDC, SGC);
 var ShovelImagePre = addNBR(addNDVI(addGNDVI(addSR(refImgS))));
 var ShovelImagePost = addNBR(addNDVI(addGNDVI(addSR(refImgS2))));
-var shovelUnmixed = mesma_HLS(refImgS);
+var shovelUnmixed = mesma_HLS(refImgS, em_lib, stimg);
 //Map.addLayer(shovelUnmixed.clip(shovel), {}, 'ShovelUnmixed');//You can uncomment this line to add the layer to the map
 var sRMSE = shovelUnmixed.select('rmse').reduceRegion(ee.Reducer.mean(), SCFP, 30);
 //print(sRMSE);
@@ -547,7 +547,7 @@ var ShovelIF_coarse = unmixApp_coarse(ShovelImagePre, ShovelImagePost, shovelUnm
 var em_lib = dictSet(refImgA, ACC, ADC, AGC);
 var AndrewImagePre = addNBR(addNDVI(addGNDVI(addSR(refImgA))));
 var AndrewImagePost = addNBR(addNDVI(addGNDVI(addSR(refImgA2))));
-var andrewUnmixed = mesma_HLS(refImgA);
+var andrewUnmixed = mesma_HLS(refImgA, em_lib, stimg);
 //Map.addLayer(andrewUnmixed.clip(andrew), {}, 'AndrewUnmixed');//You can uncomment this line to add the layer to the map
 var aRMSE = andrewUnmixed.select('rmse').reduceRegion(ee.Reducer.mean(), ACFP, 30);
 //print(aRMSE);
@@ -560,7 +560,7 @@ var AndrewIF_coarse = unmixApp_coarse(AndrewImagePre, AndrewImagePost, andrewUnm
 var em_lib = dictSet(refImgT, TCC, TDC, TGC);
 var TananaImagePre = addNBR(addNDVI(addGNDVI(addSR(refImgT))));
 var TananaImagePost = addNBR(addNDVI(addGNDVI(addSR(refImgT2))));
-var tananaUnmixed = mesma_HLS(refImgT);
+var tananaUnmixed = mesma_HLS(refImgT, em_lib, stimg);
 //Map.addLayer(tananaUnmixed.clip(tanana), {}, 'TananaUnmixed');//You can uncomment this line to add the layer to the map
 
 //The Tanana Area fire is too large to calculate RMSE with Google Earth Engine's memory limit. I exported the layer to R and found the mean there.

@@ -1,0 +1,576 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var HLS = ee.ImageCollection("NASA/HLS/HLSL30/v002");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// ### Corresponding author Aiden I. G. Schore, contact: aschore2(at)illinois.edu
+
+/*#######################################################################################################
+        Citation: Schore, A. I. G.., et al., Plant Functional types improve satellite-derived burn
+                  severity assessments in interior Alaska. Environmental Research: Ecology. In prep. 
+########################################################################################################*/
+
+/*
+All products used in this code can be viewed and downloaded here. Associated shapefiles include
+fire boundaries, boundaries buffered by 1km, and spectral end member locations for each of three
+plant functional types (deciduous trees, coniferous trees, and graminoids) for each fire.
+This code selects pre- and post-fire images for each site, performs spectral unmixing to determine
+the vegetation composition in each 30m pixel, calculates fire indices, and applies fire indices to
+plant functional types (PFTs) based on the relationships generated in the associated R code.
+*/
+
+//Import the assets. To use this code with different data, replace the assets with your ouwn.
+//The first four assets are the envelopes of each fire scar with a 1-km buffer
+var SCFP = ee.FeatureCollection("projects/planet-415120/assets/ShovelCreekFirePolygon"),
+    ACFP = ee.FeatureCollection("projects/planet-415120/assets/AndrewCreekFirePolygon"),
+    NCFP = ee.FeatureCollection("projects/planet-415120/assets/NuggetCreekFirePolygon"),
+    TCFP = ee.FeatureCollection("projects/planet-415120/assets/TananaAreaFirePolygon"),
+    //The next four assets are the fire scars themselves
+    nugget = ee.FeatureCollection("projects/planet-415120/assets/NuggetCreekAOI"),
+    shovel = ee.FeatureCollection("projects/planet-415120/assets/ShovelCreekAOI"),
+    tanana = ee.FeatureCollection("projects/planet-415120/assets/TananaAreaAOI"),
+    andrew = ee.FeatureCollection("projects/planet-415120/assets/AndrewCreekAOI");
+
+//Now we import our End Member geometries. When using your own data, replace these with polygons of the locations of your end members.
+var ACC = ee.FeatureCollection("projects/planet-415120/assets/AndrewConiferEMs_final"),
+    ADC = ee.FeatureCollection("projects/planet-415120/assets/AndrewDeciduousEMs_final"),
+    AGC = ee.FeatureCollection("projects/planet-415120/assets/AndrewGraminoidEMs_final"),
+    NCC = ee.FeatureCollection("projects/planet-415120/assets/NuggetConiferEMs_final"),
+    NDC = ee.FeatureCollection("projects/planet-415120/assets/NuggetDeciduousEMs_final"),
+    NGC = ee.FeatureCollection("projects/planet-415120/assets/NuggetGraminoidEMs_final"),
+    SCC = ee.FeatureCollection("projects/planet-415120/assets/ShovelConiferEMs_final"),
+    SDC = ee.FeatureCollection("projects/planet-415120/assets/ShovelDeciduousEMs_final"),
+    SGC = ee.FeatureCollection("projects/planet-415120/assets/ShovelGraminoidEMs_final"),
+    TCC = ee.FeatureCollection("projects/planet-415120/assets/TananaConiferEMs_final"),
+    TDC = ee.FeatureCollection("projects/planet-415120/assets/TananaDeciduousEMs_final"),
+    TGC = ee.FeatureCollection("projects/planet-415120/assets/TananaGraminoidEMs_final");
+
+//**************Start and end dates**************
+//Generate time ranges to gather images from
+//Edit as needed when using your own data
+
+var startDate = ee.Date.fromYMD(2017, 6, 15);
+var endDate =  startDate.advance(3, "month");
+
+var startDate2 = ee.Date.fromYMD(2021, 6, 15);
+var endDate2 =  startDate2.advance(1, "month"); //Because this is already a year later than I'd like, I limited the search to early summer
+
+var startDate3 = ee.Date.fromYMD(2016, 6, 15);
+var endDate3 =  startDate3.advance(3, "month");
+
+var startDate4 = ee.Date.fromYMD(2020, 6, 15);
+var endDate4 =  startDate4.advance(3, "month");
+
+var startDate5 = ee.Date.fromYMD(2019, 6, 15);
+var endDate5 =  startDate5.advance(3, "month");
+
+var startDate6 = ee.Date.fromYMD(2013, 6, 15);
+var endDate6 =  startDate6.advance(3, "month");
+
+//**************Cloud Masking Algorithms**************
+//Build functions to mask clouds
+
+var getQABits = function(image, start, end, newName) {
+    // Compute the bits we need to extract.
+    var pattern = 0;
+    for (var i = start; i <= end; i++) {
+       pattern += Math.pow(2, i);
+    }
+    return image.select([0], [newName])
+                  .bitwiseAnd(pattern)
+                  .rightShift(start);
+};
+
+var cloud_shadows = function(image) {
+  var QA = image.select(['Fmask']);
+  return getQABits(QA, 3,3, 'cloud_shadows').eq(0);
+  // Return an image masking out cloudy areas.
+};
+
+// A function to mask out cloudy pixels.
+var clouds = function(image) {
+  var QA = image.select(['Fmask']);
+  return getQABits(QA, 1,2, 'Cloud').eq(0);
+  };
+
+//Mask clouds & cloud shadows from image
+var maskClouds = function(image) {
+  var cs = cloud_shadows(image);
+  var c = clouds(image);
+  image = image.updateMask(cs);
+  return image.updateMask(c);
+};
+
+//Mask clouds from alternate time point of image
+var maskCloudsAnalog = function(image, image2) {
+  var cs = cloud_shadows(image);
+  var c = clouds(image);
+  image2 = image2.updateMask(cs);
+  return image2.updateMask(c);
+};
+
+//**************Color Palettes**************
+var Color_comp = {bands:"red,green,blue", min: 0, max: 0.2, gamma: 1};
+var monochrome = {min:0, max:3};
+
+/*I selected the best pre- and post-fire images manually in the below sections as the HLS product's cloud detection isn't perfect and I wanted to
+ensure I didn't introduce any errors into my analysis, particularly in the case of hazy images*/
+
+//***************Shovel Creek***************
+//****Pre-fire****
+//Find best pre-fire image
+var HLSS = HLS.filterBounds(shovel).filterDate(startDate,endDate);
+var rgbListS = HLSS.toList(HLSS.size());
+var imgS = ee.Image(rgbListS.get(3)); //July 6, 2017 - closest image to fire where clouds are absent/unobtrusive
+
+//There are clouds, let's remove them
+var imgS2 = maskClouds(imgS);
+
+//Keep only the bands we want to use in our analysis and name them for convenience
+var refImgS = imgS2.select(["B5", "B6", "B7", "B2", "B3", "B4"], ['NIR', 'SWIR1', 'SWIR2', 'blue', 'green', 'red']);
+//Map.addLayer(refImgS.clip(SCFP), Color_comp, 'ShovelPre');//You can uncomment this line to add the layer to the map
+
+//****Post-fire****
+//Find best post-fire image
+var HLSS2 = HLS.filterBounds(shovel).filterDate(startDate2,endDate2);
+var rgbListS2 = HLSS2.toList(HLSS2.size());
+var imgS3 = ee.Image(rgbListS2.get(3)); //July 1, 2021 - no cloud-free images in 2020
+
+//Mask the areas with clouds in the pre-fire image out of this one too
+var imgS4 = maskCloudsAnalog(imgS, imgS3);
+var refImgS2 = imgS4.select(["B5", "B6", "B7", "B2", "B3", "B4"], ['NIR', 'SWIR1', 'SWIR2', 'blue', 'green', 'red']);
+//Map.addLayer(refImgS2.clip(SCFP), Color_comp, 'ShovelPost');//You can uncomment this line to add the layer to the map
+
+//***************Nugget Creek***************
+//****Pre-fire****
+var HLSN = HLS.filterBounds(nugget).filterDate(startDate3,endDate3);
+var rgbListN = HLSN.toList(HLSN.size());
+var imgN = ee.Image(rgbListN.get(5)); //July 12, 2016 - closest image to fire where clouds are absent/unobtrusive
+
+//There are clouds, let's remove them
+var imgN2 = maskClouds(imgN);
+var refImgN = imgN2.select(["B5", "B6", "B7", "B2", "B3", "B4"], ['NIR', 'SWIR1', 'SWIR2', 'blue', 'green', 'red']);
+//Map.addLayer(refImgN.clip(NCFP), Color_comp, 'NuggetPre');//You can uncomment this line to add the layer to the map
+
+//****Post-fire****
+var HLSN2 = HLS.filterBounds(nugget).filterDate(startDate4,endDate4);
+var rgbListN2 = HLSN2.toList(HLSN2.size());
+var imgN3 = ee.Image(rgbListN2.get(13)); //August 17, 2020
+
+//Mask the areas with clouds in the pre-fire image out of this one too
+var imgN4 = maskCloudsAnalog(imgN, imgN3);
+var refImgN2 = imgN4.select(["B5", "B6", "B7", "B2", "B3", "B4"], ['NIR', 'SWIR1', 'SWIR2', 'blue', 'green', 'red']);
+//Map.addLayer(refImgN2.clip(NCFP), Color_comp, 'NuggetPost');//You can uncomment this line to add the layer to the map
+
+//***************Andrew Creek***************
+//****Pre-fire****
+var HLSA = HLS.filterBounds(andrew).filterDate(startDate3,endDate3);
+var rgbListA = HLSA.toList(HLSA.size());
+var imgA = ee.Image(rgbListA.get(4)); //July 14, 2016 (no peak-season cloud free 2017 images)
+var refImgA = imgA.select(["B5", "B6", "B7", "B2", "B3", "B4"], ['NIR', 'SWIR1', 'SWIR2', 'blue', 'green', 'red']);
+//Map.addLayer(refImgA.clip(ACFP), Color_comp, 'AndrewPre');//You can uncomment this line to add the layer to the map
+
+//****Post-fire****
+var HLSA2 = HLS.filterBounds(andrew).filterDate(startDate5,endDate5);
+var rgbListA2 = HLSA2.toList(HLSA2.size());
+var imgA3 = ee.Image(rgbListA2.get(11)); //August 8, 2019 - variable name uses 3 for consistency with Shovel and Nugget Creeks
+var refImgA2 = imgA3.select(["B5", "B6", "B7", "B2", "B3", "B4"], ['NIR', 'SWIR1', 'SWIR2', 'blue', 'green', 'red']);
+//Map.addLayer(refImgA2.clip(ACFP), Color_comp, 'AndrewPost');//You can uncomment this line to add the layer to the map
+
+//***************Tanana Area***************
+//****Pre-fire****
+var HLST = HLS.filterBounds(tanana).filterDate(startDate6,endDate6);
+var rgbListT = HLST.toList(HLST.size());
+var imgT = ee.Image(rgbListT.get(16)); //August 26, 2013 (only cloud free image)
+var refImgT = imgT.select(["B5", "B6", "B7", "B2", "B3", "B4"], ['NIR', 'SWIR1', 'SWIR2', 'blue', 'green', 'red']);
+//Map.addLayer(refImgT.clip(TCFP), Color_comp, 'TananaPre');//You can uncomment this line to add the layer to the map
+
+//****Post-fire****
+var HLST2 = HLS.filterBounds(tanana).filterDate(startDate3,endDate3);
+var rgbListT2 = HLST2.toList(HLST2.size());
+var imgT3 = ee.Image(rgbListT2.get(15)); //Best image: August 18, 2016 [other imagery and ground data collected in 2017]
+var refImgT2 = imgT3.select(["B5", "B6", "B7", "B2", "B3", "B4"], ['NIR', 'SWIR1', 'SWIR2', 'blue', 'green', 'red']);
+//Map.addLayer(refImgT2.clip(TCFP), Color_comp, 'TananaPost');//You can uncomment this line to add the layer to the map
+
+
+//***********Dictionary Setup***********
+//This section adapted from github.com/qiangsunpingzh/GEE_mesma
+//To add more PFT classes, add them into the functions in the same manner as each PFT is added here
+
+//Make dictionaries
+var dictSet = function(image, coniferous, deciduous, graminoid){
+var con = coniferous.toList(coniferous.size());
+var conVals1 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(con.get(0)).geometry(), maxPixels: 1e8}).values();
+var conVals2 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(con.get(1)).geometry(), maxPixels: 1e8}).values();
+var conVals3 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(con.get(2)).geometry(), maxPixels: 1e8}).values();
+var conVals4 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(con.get(3)).geometry(), maxPixels: 1e8}).values();
+var conVals5 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(con.get(4)).geometry(), maxPixels: 1e8}).values();
+var conVals6 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(con.get(5)).geometry(), maxPixels: 1e8}).values();
+var conVals7 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(con.get(6)).geometry(), maxPixels: 1e8}).values();
+var CV1 = ee.Dictionary({'CV':conVals1});
+var CV2 = ee.Dictionary({'CV':conVals2});
+var CV3 = ee.Dictionary({'CV':conVals3});
+var CV4 = ee.Dictionary({'CV':conVals4});
+var CV5 = ee.Dictionary({'CV':conVals5});
+var CV6 = ee.Dictionary({'CV':conVals6});
+var CV7 = ee.Dictionary({'CV':conVals7}); /*Seven end members is the maximum that would reliably run for all four fire scars without hitting Google
+Earth Engine's memory limit. You can use more or fewer end members or even different numbers for different classes, just alter the function accordingly.
+I recommend using the same number of end members per class at each site, otherwise running the code as is will result in errors.*/
+
+var dec = deciduous.toList(deciduous.size());
+var decVals1 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(dec.get(0)).geometry(), maxPixels: 1e8}).values();
+var decVals2 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(dec.get(1)).geometry(), maxPixels: 1e8}).values();
+var decVals3 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(dec.get(2)).geometry(), maxPixels: 1e8}).values();
+var decVals4 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(dec.get(3)).geometry(), maxPixels: 1e8}).values();
+var decVals5 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(dec.get(4)).geometry(), maxPixels: 1e8}).values();
+var decVals6 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(dec.get(5)).geometry(), maxPixels: 1e8}).values();
+var decVals7 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(dec.get(6)).geometry(), maxPixels: 1e8}).values();
+var DV1 = ee.Dictionary({'DV':decVals1});
+var DV2 = ee.Dictionary({'DV':decVals2});
+var DV3 = ee.Dictionary({'DV':decVals3});
+var DV4 = ee.Dictionary({'DV':decVals4});
+var DV5 = ee.Dictionary({'DV':decVals5});
+var DV6 = ee.Dictionary({'DV':decVals6});
+var DV7 = ee.Dictionary({'DV':decVals7});
+
+var gra = graminoid.toList(graminoid.size());
+var graVals1 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(gra.get(0)).geometry(), maxPixels: 1e8}).values();
+var graVals2 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(gra.get(1)).geometry(), maxPixels: 1e8}).values();
+var graVals3 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(gra.get(2)).geometry(), maxPixels: 1e8}).values();
+var graVals4 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(gra.get(3)).geometry(), maxPixels: 1e8}).values();
+var graVals5 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(gra.get(4)).geometry(), maxPixels: 1e8}).values();
+var graVals6 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(gra.get(5)).geometry(), maxPixels: 1e8}).values();
+var graVals7 = image.reduceRegion({reducer: ee.Reducer.mean(), 
+    geometry:ee.Feature(gra.get(6)).geometry(), maxPixels: 1e8}).values();
+var GV1 = ee.Dictionary({'GV':graVals1});
+var GV2 = ee.Dictionary({'GV':graVals2});
+var GV3 = ee.Dictionary({'GV':graVals3});
+var GV4 = ee.Dictionary({'GV':graVals4});
+var GV5 = ee.Dictionary({'GV':graVals5});
+var GV6 = ee.Dictionary({'GV':graVals6});
+var GV7 = ee.Dictionary({'GV':graVals7});
+
+//Make dictionary combinations for MESMA
+//If you've changed the number of end members, make sure it's also altered here.
+var V = ee.List([CV1, CV2, CV3, CV4, CV5, CV6, CV7, DV1, DV2, DV3, DV4,
+  DV5, DV6, DV7, GV1, GV2, GV3, GV4, GV5, GV6, GV7]);
+var em2 = ee.List([]);
+var em3 = ee.List([]);
+//If you use more classes, add more nested loops, if you use fewer, remove a layer.
+//The 21 for i, j, and k represents the total number of end members. If you've changed that, change the number here as well
+for (var i=0;i<21;i++) {
+  var m1 = V.get(i);
+  for (var j=i;j<21;j++) {
+    var m2 = V.get(j);
+    var em_2 = ee.Dictionary(m1).combine(ee.Dictionary(m2));
+    var emC2 = ee.Algorithms.If({
+        condition: ee.Algorithms.IsEqual(em_2.size(),2),
+        trueCase: em_2,
+        falseCase: 0
+    });
+    em2 = em2.add(emC2);
+    for (var k=j;k<21;k++){
+      var m3 = V.get(k);
+      var em_3 = ee.Dictionary(m1).combine(ee.Dictionary(m2)).combine(ee.Dictionary(m3));
+      var emC3 = ee.Algorithms.If({
+        condition: ee.Algorithms.IsEqual(em_3.size(),3),
+        trueCase: em_3,
+        falseCase: 0
+      });
+      em3 = em3.add(emC3);
+      }
+    }
+}
+var EMlib2 = em2.removeAll([0]);
+var EMlib3 = em3.removeAll([0]);
+
+//If you've added classes, concatenate them here
+var em_lib = EMlib2.cat(EMlib3);
+return em_lib;
+};
+
+//Empty unmixed image
+//If you use a different number of classes, make sure the number of 0.0s matches and that each class is renamed
+var stimg = ee.Image([0.0,0.0,0.0]).rename(['CV','GV','DV']).toFloat();
+
+var HLSbands = ['NIR', 'SWIR1','SWIR2','blue','green','red'];
+//MESMA function for Harmonized Landsat/Sentinel Product
+var mesma_HLS = function(image, em_lib, stimg) {
+    var ks = ee.Image(image.select(HLSbands));
+    var ummixed = function(i){
+      var id = ee.Image(em_lib.indexOf(i)).rename('id');
+      var em_key = ee.Dictionary(i).keys();
+      var em_value = ee.Dictionary(i).values(em_key);
+      var em = ee.Image(ee.Array(em_value).transpose());
+      
+      var col = ks.unmix(em_value,true,true).rename(em_key);
+      var colarray = col.toArray().toArray(1);
+      var REcon = em.matrixMultiply(colarray)
+      .arrayProject([0])
+      .arrayFlatten(
+      [['NIR', 'SWIR1','SWIR2','blue','green','red']]);
+      var ks1 = ks.subtract(REcon);
+      // rmse is changed to a negative number for qualityMosaic with lowest RMSE
+      var rmse = ks1.expression(
+      '-sqrt((b1*b1+b2*b2+b3*b3+b4*b4+b5*b5+b6*b6)/6)',
+      {
+        b1: ks1.select('NIR'), 
+        b2: ks1.select('SWIR1'),
+        b3: ks1.select('SWIR2'),
+        b4: ks1.select('blue'),
+        b5: ks1.select('green'), 
+        b6: ks1.select('red'), 
+      }).rename('rmse');
+      var sma = col.addBands(rmse).addBands(id).toFloat();
+      var mesma = stimg.addBands({
+          srcImg:sma,
+          overwrite:true
+          });
+      return mesma; 
+    };
+  var unmixed_result =  em_lib.map(ummixed);
+  unmixed_result = ee.ImageCollection(unmixed_result).qualityMosaic('rmse');
+  
+  return unmixed_result;
+};
+
+//**************Index Setup****************
+//Create band for each of the indices tested
+//All indices tested are here even if they didn't end up getting used
+//If you want to use additional indices, define them here
+var addNDVI = function(image){
+  var NDVI =image.expression(
+      '(b1-b2)/(b1+b2)',
+      {
+        b1: image.select('NIR').toFloat(), 
+        b2: image.select('red').toFloat()
+      }).rename('NDVI');
+  return image.addBands(NDVI);
+};
+
+var addBAI = function(image){
+  var BAI =image.expression(
+      '1/((0.1-b1)*(0.1-b1)+(0.06-b2)*(0.06-b2))',
+      {
+        b1: image.select('red').toFloat(), 
+        b2: image.select('NIR').toFloat()
+      }).rename('BAI');
+  return image.addBands(BAI).toFloat();
+};
+
+var addSR = function(image){
+  var SR =image.expression(
+      'b1/b2',
+      {
+        b1: image.select('NIR').toFloat(), 
+        b2: image.select('red').toFloat()
+      }).rename('SR');
+  return image.addBands(SR);
+};
+
+var addDVI = function(image){
+  var DVI =image.expression(
+      'b1-b2',
+      {
+        b1: image.select('NIR').toFloat(), 
+        b2: image.select('red').toFloat()
+      }).rename('DVI');
+  return image.addBands(DVI);
+};
+
+var addSAVI = function(image){
+  var SAVI =image.expression(
+      '(1.5*(b1-b2))/(b1+b2+0.5)',
+      {
+        b1: image.select('NIR').toFloat(), 
+        b2: image.select('red').toFloat()
+      }).toFloat().rename('SAVI');
+  return image.addBands(SAVI);
+};
+
+var addMSAVI = function(image){
+  var MSAVI1 =image.expression(
+      '((2*b1+1)*(2*b1+1)-8*(b1-b2))',
+      {
+        b1: image.select('NIR').toFloat(), 
+        b2: image.select('red').toFloat()
+      });
+  var MSAVI2 = MSAVI1.sqrt();
+  var MSAVI3 =image.expression(
+      '(2*b1+1)',
+      {
+        b1: image.select('NIR').toFloat()
+      });
+  var MSAVI = (MSAVI3.subtract(MSAVI2)).divide(2).toFloat().rename('MSAVI');
+  return image.addBands(MSAVI);
+};
+
+var addGEMI = function(image){
+  var gamma =image.expression(
+      '((2*((b1*b1)-(b2*b2)))+1.5*b1+0.5*b2)/(b1+b2+0.5)',
+      {
+        b1: image.select('NIR').toFloat(), 
+        b2: image.select('red').toFloat()
+      });
+  var GEMI1 =image.expression(
+      '(b1-0.125)/(1-b1)',
+      {
+        b1: image.select('red').toFloat()
+      });
+  var GEMI2 = (gamma.multiply(-0.25)).add(1);
+  var GEMI3 = gamma.multiply(GEMI2);
+  var GEMI = GEMI3.subtract(GEMI1).toFloat().rename('GEMI');
+  return image.addBands(GEMI);
+};
+
+var addGNDVI = function(image){
+  var GNDVI =image.expression(
+      '(b1-b2)/(b1+b2)',
+      {
+        b1: image.select('NIR').toFloat(), 
+        b2: image.select('green').toFloat()
+      }).rename('GNDVI');
+  return image.addBands(GNDVI);
+};
+
+var addNBR = function(image){
+  var NBR =image.expression(
+      '(b1-b2)/(b1+b2)',
+      {
+        b1: image.select('NIR').toFloat(), 
+        b2: image.select('SWIR1').toFloat()
+      }).rename('NBR');
+  return image.addBands(NBR);
+};
+
+//********Index Application Setup********
+//This section uses the relationships based on PlanetScope values for Fine IntFire identified in the R code to apply to the unmixed HLS image
+//If you're using different data, replace those relationships.
+var unmixApp_fine = function(imagePre, imagePost, imgUnmix){
+  var NDVIpost=imagePost.select('NDVI');
+  var SRpost=imagePost.select('SR');
+  var GNDVIpost=imagePost.select('GNDVI');
+  var GNDVIpre=imagePre.select('GNDVI');
+  var dGNDVI = GNDVIpost.subtract(GNDVIpre);
+  var C_IF = dGNDVI.multiply(1.54527).add(2.45477).rename('CBI');
+  var D_IF = NDVIpost.multiply(-1.7445).add(2.8281);
+  var G_IF = SRpost.multiply(-0.1986).add(2.58694);
+  var ICV = imgUnmix.select('CV');
+  var IDV = imgUnmix.select('DV');
+  var IGV = imgUnmix.select('GV');
+  var CpIF = C_IF.multiply(ICV);
+  var DpIF = D_IF.multiply(IDV);
+  var GpIF = G_IF.multiply(IGV);
+  var IntFire = CpIF.add(DpIF).add(GpIF);
+  return IntFire;
+};
+
+//This function uses the relationships based on HLS values for Discrete IntFire identified in the R code to apply to the unmixed HLS image
+var unmixApp_coarse = function(imagePre, imagePost, imgUnmix){
+  var SRpost=imagePost.select('SR');
+  var GNDVIpost=imagePost.select('GNDVI');
+  var NBRpre=imagePre.select('NBR');
+  var NBRpost=imagePost.select('NBR');
+  var dNBR=(NBRpost.subtract(NBRpre)).multiply(-1); //For some reason I have yet to find, dNBR values are multiplied by -1. This corrects that.
+  var C_IF = GNDVIpost.multiply(-4.4527).add(4.7336).rename('CBI');
+  var D_IF = (dNBR.log()).multiply(0.6418).add(2.7639);
+  var G_IF = SRpost.multiply(-0.22705).add(2.87169);
+  var ICV = imgUnmix.select('CV');
+  var IDV = imgUnmix.select('DV');
+  var IGV = imgUnmix.select('GV');
+  var CpIF = C_IF.multiply(ICV);
+  var DpIF = D_IF.multiply(IDV);
+  var GpIF = G_IF.multiply(IGV);
+  var IntFire = CpIF.add(DpIF).add(GpIF);
+  return IntFire;
+};
+
+//**************Running***************
+//Running these all at once will exceed Google Earth Engine's memory limit. Comment out the ones you're not running with /*...*/ notation.
+//********Nugget********
+//Define library based on pre-selected end members
+var em_lib = dictSet(refImgN, NCC, NDC, NGC);
+
+//Add necessary index bands to the pre- and post-fire images. If you have different relationships, make sure to add the appropriate bands.
+var NuggetImagePre = addNBR(addNDVI(addGNDVI(addSR(refImgN))));
+var NuggetImagePost = addNBR(addNDVI(addGNDVI(addSR(refImgN2))));
+
+//Create the unmixed images
+var nuggetUnmixed = mesma_HLS(refImgN);
+//Map.addLayer(nuggetUnmixed.clip(nugget), {}, 'NuggetUnmixed');//You can uncomment this line to add the layer to the map
+
+//Calculate RMSE for the unmixed image
+var nRMSE = nuggetUnmixed.select('rmse').reduceRegion(ee.Reducer.mean(), NCFP, 30);
+//print(nRMSE);
+
+//Calculate Unmixed IntFire
+var NuggetIF = unmixApp_fine(NuggetImagePre, NuggetImagePost, nuggetUnmixed).clip(nugget);
+//Map.addLayer(NuggetIF.clip(NCFP), monochrome, 'NuggetIF');//You can uncomment this line to add the layer to the map
+
+//Calculate Coarse IntFire
+var NuggetIF_coarse = unmixApp_coarse(NuggetImagePre, NuggetImagePost, nuggetUnmixed).clip(nugget);
+//Map.addLayer(NuggetIF_coarse.clip(NCFP), monochrome, 'NuggetIF_coarse');//You can uncomment this line to add the layer to the map
+
+
+//********Shovel********
+var em_lib = dictSet(refImgS, SCC, SDC, SGC);
+var ShovelImagePre = addNBR(addNDVI(addGNDVI(addSR(refImgS))));
+var ShovelImagePost = addNBR(addNDVI(addGNDVI(addSR(refImgS2))));
+var shovelUnmixed = mesma_HLS(refImgS);
+//Map.addLayer(shovelUnmixed.clip(shovel), {}, 'ShovelUnmixed');//You can uncomment this line to add the layer to the map
+var sRMSE = shovelUnmixed.select('rmse').reduceRegion(ee.Reducer.mean(), SCFP, 30);
+//print(sRMSE);
+var ShovelIF = unmixApp_fine(ShovelImagePre, ShovelImagePost, shovelUnmixed).clip(shovel);
+//Map.addLayer(ShovelIF.clip(ShCFP), monochrome, 'ShovelIF');//You can uncomment this line to add the layer to the map
+var ShovelIF_coarse = unmixApp_coarse(ShovelImagePre, ShovelImagePost, shovelUnmixed).clip(shovel);
+//Map.addLayer(ShovelIF_coarse.clip(ShCFP), monochrome, 'ShovelIF_coarse');//You can uncomment this line to add the layer to the map
+
+//********Andrew********
+var em_lib = dictSet(refImgA, ACC, ADC, AGC);
+var AndrewImagePre = addNBR(addNDVI(addGNDVI(addSR(refImgA))));
+var AndrewImagePost = addNBR(addNDVI(addGNDVI(addSR(refImgA2))));
+var andrewUnmixed = mesma_HLS(refImgA);
+//Map.addLayer(andrewUnmixed.clip(andrew), {}, 'AndrewUnmixed');//You can uncomment this line to add the layer to the map
+var aRMSE = andrewUnmixed.select('rmse').reduceRegion(ee.Reducer.mean(), ACFP, 30);
+//print(aRMSE);
+var AndrewIF = unmixApp_fine(AndrewImagePre, AndrewImagePost, andrewUnmixed).clip(andrew);
+//Map.addLayer(AndrewIF.clip(ACFP), monochrome, 'AndrewIF');//You can uncomment this line to add the layer to the map
+var AndrewIF_coarse = unmixApp_coarse(AndrewImagePre, AndrewImagePost, andrewUnmixed).clip(andrew);
+//Map.addLayer(AndrewIF_coarse.clip(ACFP), monochrome, 'AndrewIF_coarse');//You can uncomment this line to add the layer to the map
+
+//********Tanana********
+var em_lib = dictSet(refImgT, TCC, TDC, TGC);
+var TananaImagePre = addNBR(addNDVI(addGNDVI(addSR(refImgT))));
+var TananaImagePost = addNBR(addNDVI(addGNDVI(addSR(refImgT2))));
+var tananaUnmixed = mesma_HLS(refImgT);
+//Map.addLayer(tananaUnmixed.clip(tanana), {}, 'TananaUnmixed');//You can uncomment this line to add the layer to the map
+
+//The Tanana Area fire is too large to calculate RMSE with Google Earth Engine's memory limit. I exported the layer to R and found the mean there.
+//var tRMSE = tananaUnmixed.select('rmse').reduceRegion(ee.Reducer.mean(), TCFP, 30);
+//print(tRMSE);
+
+var TananaIF = unmixApp_fine(TananaImagePre, TananaImagePost, tananaUnmixed).clip(tanana);
+//Map.addLayer(TananaIF.clip(TCFP), monochrome, 'TananaIF');//You can uncomment this line to add the layer to the map
+var TananaIF_coarse = unmixApp_coarse(TananaImagePre, TananaImagePost, tananaUnmixed).clip(tanana);
+//Map.addLayer(TananaIF_coarse.clip(TCFP), monochrome, 'TananaIF_coarse');//You can uncomment this line to add the layer to the map
+
+//**********************END******************************
+//That's everything this code calculates. Export assets as needed.

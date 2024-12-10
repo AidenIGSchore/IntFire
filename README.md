@@ -2,7 +2,7 @@
 ### Department of Plant Biology, University of Illinois at Urbana-Champaign
 ### [aschore2@illinois.edu](mailto:aschore2@illinois.edu)
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14360232.svg)](https://doi.org/10.5281/zenodo.14360231)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14360231.svg)](https://doi.org/10.5281/zenodo.14360231)
 
 This repository contains the code used in "Plant Functional types improve satellite-derived burn severity assessments in interior Alaska" to calculate
 the new Integrated Vegetation-Fire Severity Index (IntFire).
